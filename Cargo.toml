@@ -5,7 +5,5 @@ edition = "2024"
 
 [dependencies]
 opencv = "0.92"
-
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-ar = "aarch64-linux-gnu-ar"
+actix-web = "4"
+async-stream = "0.3"
