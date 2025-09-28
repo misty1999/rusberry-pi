@@ -7,5 +7,3 @@ edition = "2024"
 opencv = "0.92"
 actix-web = "4"
 async-stream = "0.3"
-log = "0.4"
-env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
