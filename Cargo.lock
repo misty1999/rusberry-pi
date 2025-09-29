@@ -1378,6 +1378,7 @@ dependencies = [
  "ndarray 0.15.1",
  "opencv",
  "ort",
+ "tokio",
 ]
 
 [[package]]
