@@ -13,7 +13,7 @@ use ort::session::SessionInputValue;
 use ort::session::builder::SessionBuilder;
 use ort::value::Value;
 
-// モデル入力サイズ（Detectorは256 NHWC、Landmarkは224 NCHW 想定）
+// モデル入力サイズ（どちらも NCHW 前提）
 const DETECTOR_SIZE: i32 = 256;
 const LANDMARK_SIZE: i32 = 224;
 
@@ -232,8 +232,8 @@ async fn hand_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_web
                 }
                 if frame.empty() { continue; }
 
-                // ===== Detector 前処理 (NHWC) & 推論 =====
-                let det_in = preprocess_nhwc(&frame, DETECTOR_SIZE);
+                // ===== Detector 前処理 (NCHW) & 推論 =====
+                let det_in = preprocess_nchw(&frame, DETECTOR_SIZE);
                 let det_shape: Vec<usize> = det_in.shape().to_vec();
                 let det_data: Vec<f32> = det_in.into_raw_vec();
 
@@ -262,7 +262,7 @@ async fn hand_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_web
                             };
 
                             // ===== Landmark 前処理 (NCHW) & 推論 =====
-                            let lm_in = preprocess_nhwc(&roi, LANDMARK_SIZE);
+                            let lm_in = preprocess_nchw(&roi, LANDMARK_SIZE);
                             let lm_shape: Vec<usize> = lm_in.shape().to_vec();
                             let lm_data: Vec<f32> = lm_in.into_raw_vec();
 
