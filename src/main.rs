@@ -9,10 +9,11 @@ use std::time::Duration;
 
 // ort + ndarray は骨格推定エンドポイント用。
 // まだ推論の実装を入れ切らないため、未使用警告を抑制します。
-#[allow(unused_imports)]
-use ort::Environment;
-#[allow(unused_imports)]
 use ndarray::Array4;
+use ort::session::Session;
+use ort::value::Value;
+use ort::session::SessionInputValue;
+use ort::session::builder::SessionBuilder;
 
 async fn stream_handler(_req: HttpRequest) -> impl Responder {
     let boundary = "boundarydonotcross";
@@ -113,28 +114,25 @@ fn preprocess(frame: &Mat, size: i32) -> Array4<f32> {
     input
 }
 
-// 骨格（手）推定のMJPEGストリーム。/stream はそのまま、こちらは別ルート。
-async fn hand_stream_handler(_req: HttpRequest) -> impl Responder {
+async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_web::Error> {
     let boundary = "boundarydonotcross";
 
     // カメラオープン
-    let mut cam = videoio::VideoCapture::new(0, videoio::CAP_ANY).unwrap();
+    let mut cam = videoio::VideoCapture::new(0, videoio::CAP_ANY)
+        .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    // モデル読み込み（簡便化のため各接続ごとに初期化）
-    // 実運用では共有ステートに載せて再利用するのが望ましい
-    let env = std::sync::Arc::new(Environment::builder().with_name("hand").build().unwrap());
-    let _detector = env
-        .new_session_builder()
-        .unwrap()
-        .with_model_from_file("/home/matsu/models/MediaPipeHandDetector.onnx")
-        .unwrap();
-    let _landmark = env
-        .new_session_builder()
-        .unwrap()
-        .with_model_from_file("/home/matsu/models/hand_landmark_sparse_Nx3x224x224.onnx")
-        .unwrap();
+    // --- モデルは最初にロードして再利用する ---
+    let mut detector: Session = SessionBuilder::new()
+        .map_err(actix_web::error::ErrorInternalServerError)?
+        .commit_from_file("/home/pi/models/MediaPipeHandDetector.onnx")
+        .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    HttpResponse::Ok()
+    let landmark: Session = SessionBuilder::new()
+        .map_err(actix_web::error::ErrorInternalServerError)?
+        .commit_from_file("/home/pi/models/hand_landmark_sparse_Nx3x224x224.onnx")
+        .map_err(actix_web::error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok()
         .append_header((
             "Content-Type",
             format!("multipart/x-mixed-replace; boundary={}", boundary),
@@ -142,19 +140,45 @@ async fn hand_stream_handler(_req: HttpRequest) -> impl Responder {
         .streaming::<_, actix_web::Error>(async_stream::stream! {
             loop {
                 let mut frame = Mat::default();
-                cam.read(&mut frame).unwrap();
+                if let Err(e) = cam.read(&mut frame) {
+                    yield Err(actix_web::error::ErrorInternalServerError(e));
+                    continue;
+                }
                 if frame.empty() {
                     continue;
                 }
 
-                // 前処理テンソル（例: 224x224）
-                let _input = preprocess(&frame, 224);
+                // --- 入力テンソル作成 ---
+                let input: Array4<f32> = preprocess(&frame, 224);
+                let shape: Vec<usize> = input.shape().to_vec();
+                let data: Vec<f32> = input.into_raw_vec();
+                let input_value = match Value::from_array((shape, data)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        yield Err(actix_web::error::ErrorInternalServerError(e));
+                        continue;
+                    }
+                };
 
-                // TODO: _input を detector に供給して手の検出ボックスを得る
-                // TODO: 検出ボックスに基づき切り出し、landmark に供給
-                // TODO: 出力21点を frame に描画（骨格ラインも）
+                // --- 推論実行 ---
+                let outputs = match detector.run([SessionInputValue::from(input_value)]) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        yield Err(actix_web::error::ErrorInternalServerError(e));
+                        continue;
+                    }
+                };
 
-                // ひとまずプレースホルダ表示（エンドポイントの有効性確認用）
+                // --- 出力確認 ---
+                if let Ok((out_shape, out_data)) = outputs[0].try_extract_tensor::<f32>() {
+                    dbg!(out_shape);
+                    dbg!(out_data.get(0));
+                }
+
+                // TODO: 検出結果を使ってROIを切り出し、landmarkモデルに入力
+                // TODO: 出力21点をframeに描画
+
+                // プレースホルダ表示
                 imgproc::put_text(
                     &mut frame,
                     "Hand Pose",
@@ -169,7 +193,10 @@ async fn hand_stream_handler(_req: HttpRequest) -> impl Responder {
 
                 // JPEG エンコード
                 let mut buf: core::Vector<u8> = core::Vector::new();
-                imgcodecs::imencode(".jpg", &frame, &mut buf, &core::Vector::<i32>::new()).unwrap();
+                if let Err(e) = imgcodecs::imencode(".jpg", &frame, &mut buf, &core::Vector::<i32>::new()) {
+                    yield Err(actix_web::error::ErrorInternalServerError(e));
+                    continue;
+                }
 
                 // multipart 形式で送信
                 let mut data = Vec::new();
@@ -182,7 +209,7 @@ async fn hand_stream_handler(_req: HttpRequest) -> impl Responder {
                 yield Ok::<_, actix_web::Error>(web::Bytes::from(data));
                 thread::sleep(Duration::from_millis(100)); // 10fps
             }
-        })
+        }))
 }
 
 #[actix_web::main]
