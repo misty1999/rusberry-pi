@@ -224,7 +224,7 @@ async fn hand_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_web
         .map_err(actix_web::error::ErrorInternalServerError)?;
     println!("[hand] Detectorモデルをロードしました");
 
-    let landmark: Session = SessionBuilder::new()
+    let mut landmark: Session = SessionBuilder::new()
         .map_err(actix_web::error::ErrorInternalServerError)?
         .commit_from_file("/home/matsu/models/hand_landmark_sparse_Nx3x224x224.onnx")
         .map_err(actix_web::error::ErrorInternalServerError)?;
@@ -281,7 +281,11 @@ async fn hand_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_web
                     if let Some((rect, kps)) = decode_best_detection(&out_data, cols, rows) {
                         if let Some(r) = clamp_rect(rect, cols, rows) {
                             // ROI抽出
-                            let roi = Mat::roi(&frame, r).unwrap_or_else(|_| frame.clone());
+                            let roi = match Mat::roi(&frame, r) {
+                                Ok(sub) => sub.try_clone().unwrap(),  // BoxedRef<Mat> → Mat
+                                Err(_) => frame.clone(),
+                            };
+
 
                             // Landmark前処理（224x224）
                             let l_input: Array4<f32> = preprocess(&roi, LANDMARK_SIZE);
