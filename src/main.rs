@@ -15,19 +15,31 @@ use ort::value::Value;
 use ort::session::SessionInputValue;
 use ort::session::builder::SessionBuilder;
 
-async fn stream_handler(_req: HttpRequest) -> impl Responder {
+async fn stream_handler(req: HttpRequest) -> impl Responder {
+    println!("[stream] リクエスト受信: {}", req.path());
     let boundary = "boundarydonotcross";
     let mut cam = videoio::VideoCapture::new(0, videoio::CAP_ANY).unwrap();
+    match cam.is_opened() {
+        Ok(true) => println!("[stream] カメラをオープンしました"),
+        Ok(false) => println!("[stream] カメラを開けませんでした"),
+        Err(e) => println!("[stream] カメラ状態取得エラー: {e}"),
+    }
 
     HttpResponse::Ok()
         .append_header(("Content-Type", format!("multipart/x-mixed-replace; boundary={}", boundary)))
         .streaming::<_, actix_web::Error>(async_stream::stream! {
+            let mut frame_count: u64 = 0;
             loop {
                 let mut frame = Mat::default();
-                cam.read(&mut frame).unwrap();
-                if frame.empty() {
+                if let Err(e) = cam.read(&mut frame) {
+                    println!("[stream] フレーム読込エラー: {e}");
                     continue;
                 }
+                if frame.empty() {
+                    println!("[stream] 空フレームをスキップ");
+                    continue;
+                }
+                frame_count += 1;
 
                 // === ここから輪郭検出処理 ===
 
@@ -48,6 +60,7 @@ async fn stream_handler(_req: HttpRequest) -> impl Responder {
                     imgproc::CHAIN_APPROX_SIMPLE,
                     Point::new(0, 0),
                 ).unwrap();
+                println!("[stream] 輪郭数: {} (frame #{})", contours.len(), frame_count);
 
                 // 輪郭描画
                 imgproc::draw_contours(
@@ -66,7 +79,10 @@ async fn stream_handler(_req: HttpRequest) -> impl Responder {
 
                 // JPEG エンコード（typesエイリアスではなくcore::Vectorを使用）
                 let mut buf: core::Vector<u8> = core::Vector::new();
-                imgcodecs::imencode(".jpg", &frame, &mut buf, &core::Vector::<i32>::new()).unwrap();
+                if let Err(e) = imgcodecs::imencode(".jpg", &frame, &mut buf, &core::Vector::<i32>::new()) {
+                    println!("[stream] JPEGエンコード失敗: {e}");
+                    continue;
+                }
 
                 // multipart のフォーマットにして送信
                 let mut data = Vec::new();
@@ -114,23 +130,31 @@ fn preprocess(frame: &Mat, size: i32) -> Array4<f32> {
     input
 }
 
-async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_web::Error> {
+async fn hand_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_web::Error> {
+    println!("[hand] リクエスト受信: {}", req.path());
     let boundary = "boundarydonotcross";
 
     // カメラオープン
     let mut cam = videoio::VideoCapture::new(0, videoio::CAP_ANY)
         .map_err(actix_web::error::ErrorInternalServerError)?;
+    match cam.is_opened() {
+        Ok(true) => println!("[hand] カメラをオープンしました"),
+        Ok(false) => println!("[hand] カメラを開けませんでした"),
+        Err(e) => println!("[hand] カメラ状態取得エラー: {e}"),
+    }
 
     // --- モデルは最初にロードして再利用する ---
     let mut detector: Session = SessionBuilder::new()
         .map_err(actix_web::error::ErrorInternalServerError)?
         .commit_from_file("/home/matsu/models/MediaPipeHandDetector.onnx")
         .map_err(actix_web::error::ErrorInternalServerError)?;
+    println!("[hand] Detectorモデルをロードしました");
 
     let landmark: Session = SessionBuilder::new()
         .map_err(actix_web::error::ErrorInternalServerError)?
         .commit_from_file("/home/matsu/models/hand_landmark_sparse_Nx3x224x224.onnx")
         .map_err(actix_web::error::ErrorInternalServerError)?;
+    println!("[hand] Landmarkモデルをロードしました");
 
     Ok(HttpResponse::Ok()
         .append_header((
@@ -138,15 +162,19 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
             format!("multipart/x-mixed-replace; boundary={}", boundary),
         ))
         .streaming::<_, actix_web::Error>(async_stream::stream! {
+            let mut frame_count: u64 = 0;
             loop {
                 let mut frame = Mat::default();
                 if let Err(e) = cam.read(&mut frame) {
+                    println!("[hand] フレーム読込エラー: {e}");
                     yield Err(actix_web::error::ErrorInternalServerError(e));
                     continue;
                 }
                 if frame.empty() {
+                    println!("[hand] 空フレームをスキップ");
                     continue;
                 }
+                frame_count += 1;
 
                 // --- 入力テンソル作成 ---
                 let input: Array4<f32> = preprocess(&frame, 224);
@@ -155,6 +183,7 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
                 let input_value = match Value::from_array((shape, data)) {
                     Ok(v) => v,
                     Err(e) => {
+                        println!("[hand] 入力テンソル作成エラー: {e}");
                         yield Err(actix_web::error::ErrorInternalServerError(e));
                         continue;
                     }
@@ -164,6 +193,7 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
                 let outputs = match detector.run([SessionInputValue::from(input_value)]) {
                     Ok(o) => o,
                     Err(e) => {
+                        println!("[hand] 推論エラー: {e}");
                         yield Err(actix_web::error::ErrorInternalServerError(e));
                         continue;
                     }
@@ -171,8 +201,8 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
 
                 // --- 出力確認 ---
                 if let Ok((out_shape, out_data)) = outputs[0].try_extract_tensor::<f32>() {
-                    dbg!(out_shape);
-                    dbg!(out_data.get(0));
+                    println!("[hand] 出力shape: {:?}", out_shape);
+                    println!("[hand] 出力先頭要素: {:?}", out_data.get(0));
                 }
 
                 // TODO: 検出結果を使ってROIを切り出し、landmarkモデルに入力
@@ -194,6 +224,7 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
                 // JPEG エンコード
                 let mut buf: core::Vector<u8> = core::Vector::new();
                 if let Err(e) = imgcodecs::imencode(".jpg", &frame, &mut buf, &core::Vector::<i32>::new()) {
+                    println!("[hand] JPEGエンコード失敗: {e}");
                     yield Err(actix_web::error::ErrorInternalServerError(e));
                     continue;
                 }
