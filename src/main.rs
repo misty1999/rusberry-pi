@@ -116,46 +116,27 @@ fn preprocess(frame: &Mat, size: i32) -> Array4<f32> {
 
 async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_web::Error> {
     let boundary = "boundarydonotcross";
-    eprintln!("[hand_stream] new connection. starting MJPEG stream...");
 
     // カメラオープン
     let mut cam = videoio::VideoCapture::new(0, videoio::CAP_V4L2)
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
     // --- モデルは最初にロードして再利用する ---
-    eprintln!("[hand_stream] loading detector model...");
     let mut detector: Session = SessionBuilder::new()
-        .map_err(|e| {
-            eprintln!("[hand_stream] SessionBuilder::new (detector) failed: {e}");
-            actix_web::error::ErrorInternalServerError(e)
-        })?
+        .map_err(actix_web::error::ErrorInternalServerError)?
         .commit_from_file("/home/pi/models/MediaPipeHandDetector.onnx")
-        .map_err(|e| {
-            eprintln!("[hand_stream] commit_from_file (detector) failed: {e}");
-            actix_web::error::ErrorInternalServerError(e)
-        })?;
-    eprintln!("[hand_stream] detector loaded.");
+        .map_err(actix_web::error::ErrorInternalServerError)?;
 
-    eprintln!("[hand_stream] loading landmark model...");
     let landmark: Session = SessionBuilder::new()
-        .map_err(|e| {
-            eprintln!("[hand_stream] SessionBuilder::new (landmark) failed: {e}");
-            actix_web::error::ErrorInternalServerError(e)
-        })?
+        .map_err(actix_web::error::ErrorInternalServerError)?
         .commit_from_file("/home/pi/models/hand_landmark_sparse_Nx3x224x224.onnx")
-        .map_err(|e| {
-            eprintln!("[hand_stream] commit_from_file (landmark) failed: {e}");
-            actix_web::error::ErrorInternalServerError(e)
-        })?;
-    eprintln!("[hand_stream] landmark loaded.");
+        .map_err(actix_web::error::ErrorInternalServerError)?;
 
     Ok(HttpResponse::Ok()
         .append_header((
             "Content-Type",
             format!("multipart/x-mixed-replace; boundary={}", boundary),
         ))
-        .append_header(("Cache-Control", "no-cache"))
-        .append_header(("Pragma", "no-cache"))
         .streaming::<_, actix_web::Error>(async_stream::stream! {
             loop {
                 let mut frame = Mat::default();
@@ -171,7 +152,7 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
                 let input_value = match Value::from_array((shape, data)) {
                     Ok(v) => v,
                     Err(e) => {
-                        eprintln!("Value::from_array failed: {e}");
+                        yield Err(actix_web::error::ErrorInternalServerError(e));
                         continue;
                     }
                 };
@@ -180,17 +161,15 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
                 let outputs = match detector.run([SessionInputValue::from(input_value)]) {
                     Ok(o) => o,
                     Err(e) => {
-                        eprintln!("detector.run failed: {e}");
+                        yield Err(actix_web::error::ErrorInternalServerError(e));
                         continue;
                     }
                 };
 
                 // --- 出力確認 ---
                 if let Ok((out_shape, out_data)) = outputs[0].try_extract_tensor::<f32>() {
-                    eprintln!("detector output shape: {:?}", out_shape);
-                    if let Some(v) = out_data.get(0) { eprintln!("first val: {}", v); }
-                } else {
-                    eprintln!("detector output: not a f32 tensor or extraction failed");
+                    dbg!(out_shape);
+                    dbg!(out_data.get(0));
                 }
 
                 // TODO: 検出結果を使ってROIを切り出し、landmarkモデルに入力
@@ -212,7 +191,7 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
                 // JPEG エンコード
                 let mut buf: core::Vector<u8> = core::Vector::new();
                 if let Err(e) = imgcodecs::imencode(".jpg", &frame, &mut buf, &core::Vector::<i32>::new()) {
-                    eprintln!("imencode failed: {e}");
+                    yield Err(actix_web::error::ErrorInternalServerError(e));
                     continue;
                 }
 
