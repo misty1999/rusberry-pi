@@ -4,7 +4,8 @@ use opencv::{
     imgcodecs, imgproc, prelude::*, videoio,
 };
 use std::io::Write;
-use tokio::time::{sleep, Duration};
+use std::thread;
+use std::time::Duration;
 
 // ort + ndarray は骨格推定エンドポイント用。
 // まだ推論の実装を入れ切らないため、未使用警告を抑制します。
@@ -14,18 +15,17 @@ use ort::value::Value;
 use ort::session::SessionInputValue;
 use ort::session::builder::SessionBuilder;
 
-async fn stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_web::Error> {
+async fn stream_handler(_req: HttpRequest) -> impl Responder {
     let boundary = "boundarydonotcross";
-    let mut cam = videoio::VideoCapture::new(0, videoio::CAP_V4L2)
-        .map_err(actix_web::error::ErrorInternalServerError)?;
+    let mut cam = videoio::VideoCapture::new(0, videoio::CAP_ANY).unwrap();
 
-    Ok(HttpResponse::Ok()
+    HttpResponse::Ok()
         .append_header(("Content-Type", format!("multipart/x-mixed-replace; boundary={}", boundary)))
         .streaming::<_, actix_web::Error>(async_stream::stream! {
             loop {
                 let mut frame = Mat::default();
-                if !cam.read(&mut frame).unwrap_or(false) || frame.empty() {
-                    eprintln!("Frame capture failed");
+                cam.read(&mut frame).unwrap();
+                if frame.empty() {
                     continue;
                 }
 
@@ -78,9 +78,9 @@ async fn stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_web::Er
                 data.extend_from_slice(b"\r\n");
 
                 yield Ok::<_, actix_web::Error>(web::Bytes::from(data));
-                sleep(Duration::from_millis(100)).await; // 10fps
+                thread::sleep(Duration::from_millis(100)); // 10fps
             }
-        }))
+        })
 }
 
 // 画像前処理: (1, 3, size, size) のRGB正規化テンソルに変換
@@ -118,7 +118,7 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
     let boundary = "boundarydonotcross";
 
     // カメラオープン
-    let mut cam = videoio::VideoCapture::new(0, videoio::CAP_V4L2)
+    let mut cam = videoio::VideoCapture::new(0, videoio::CAP_ANY)
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
     // --- モデルは最初にロードして再利用する ---
@@ -140,8 +140,11 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
         .streaming::<_, actix_web::Error>(async_stream::stream! {
             loop {
                 let mut frame = Mat::default();
-                if !cam.read(&mut frame).unwrap_or(false) || frame.empty() {
-                    eprintln!("Frame capture failed");
+                if let Err(e) = cam.read(&mut frame) {
+                    yield Err(actix_web::error::ErrorInternalServerError(e));
+                    continue;
+                }
+                if frame.empty() {
                     continue;
                 }
 
@@ -204,7 +207,7 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
                 data.extend_from_slice(b"\r\n");
 
                 yield Ok::<_, actix_web::Error>(web::Bytes::from(data));
-                sleep(Duration::from_millis(100)).await; // 10fps
+                thread::sleep(Duration::from_millis(100)); // 10fps
             }
         }))
 }
