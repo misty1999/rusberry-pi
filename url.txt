@@ -1,0 +1,1 @@
+https://huggingface.co/qualcomm/MediaPipe-Hand-Detection/blob/ba9417217525fda34b1c5de2292788ac03746613/MediaPipeHandDetector.onnx
