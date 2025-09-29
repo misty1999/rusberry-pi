@@ -7,5 +7,5 @@ edition = "2024"
 opencv = "0.92"
 actix-web = "4"
 async-stream = "0.3"
-ort = { version = "2", features = ["ndarray"] }
+ort = { version = "2.0.0-rc.10", features = ["ndarray"] }
 ndarray = "0.15"
