@@ -15,6 +15,10 @@ use ort::value::Value;
 use ort::session::SessionInputValue;
 use ort::session::builder::SessionBuilder;
 
+// モデル入力サイズ（Detectorは256、Landmarkは224想定）
+const DETECTOR_SIZE: i32 = 256;
+const LANDMARK_SIZE: i32 = 224;
+
 async fn stream_handler(req: HttpRequest) -> impl Responder {
     println!("[stream] リクエスト受信: {}", req.path());
     let boundary = "boundarydonotcross";
@@ -176,8 +180,8 @@ async fn hand_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_web
                 }
                 frame_count += 1;
 
-                // --- 入力テンソル作成 ---
-                let input: Array4<f32> = preprocess(&frame, 224);
+                // --- 入力テンソル作成（Detectorは256x256）---
+                let input: Array4<f32> = preprocess(&frame, DETECTOR_SIZE);
                 let shape: Vec<usize> = input.shape().to_vec();
                 let data: Vec<f32> = input.into_raw_vec();
                 let input_value = match Value::from_array((shape, data)) {
