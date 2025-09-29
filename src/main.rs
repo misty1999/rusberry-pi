@@ -1,6 +1,6 @@
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use opencv::{
-    core::{self, Point, Scalar, Size},
+    core::{self, Point, Scalar, Size, Rect},
     imgcodecs, imgproc, prelude::*, videoio,
 };
 use std::io::Write;
@@ -134,6 +134,76 @@ fn preprocess(frame: &Mat, size: i32) -> Array4<f32> {
     input
 }
 
+// ROI切り出しの矩形を画像サイズに収める
+fn clamp_rect(mut rect: Rect, cols: i32, rows: i32) -> Option<Rect> {
+    if rect.x < 0 { rect.width += rect.x; rect.x = 0; }
+    if rect.y < 0 { rect.height += rect.y; rect.y = 0; }
+    if rect.x >= cols || rect.y >= rows { return None; }
+    if rect.x + rect.width > cols { rect.width = cols - rect.x; }
+    if rect.y + rect.height > rows { rect.height = rows - rect.y; }
+    if rect.width <= 0 || rect.height <= 0 { return None; }
+    Some(rect)
+}
+
+// BlazePalm系を想定: [cx, cy, w, h, kp0x, kp0y, ... kp6x, kp6y] の18要素、値は0..1正規化と仮定
+fn decode_best_detection(det: &[f32], cols: i32, rows: i32) -> Option<(Rect, Vec<Point>)> {
+    if det.len() % 18 != 0 { return None; }
+    let mut best_idx = None;
+    let mut best_area = -1.0f32;
+    let count = det.len() / 18;
+    for i in 0..count {
+        let off = i * 18;
+        let cx = det[off + 0].clamp(0.0, 1.0);
+        let cy = det[off + 1].clamp(0.0, 1.0);
+        let w = det[off + 2].abs();
+        let h = det[off + 3].abs();
+        let area = w * h;
+        if area > best_area { best_area = area; best_idx = Some(i); }
+    }
+    let i = best_idx?;
+    let off = i * 18;
+    let cx = det[off + 0].clamp(0.0, 1.0) * cols as f32;
+    let cy = det[off + 1].clamp(0.0, 1.0) * rows as f32;
+    let w = (det[off + 2].abs() * cols as f32).max(1.0);
+    let h = (det[off + 3].abs() * rows as f32).max(1.0);
+    let x = (cx - 0.5 * w).round() as i32;
+    let y = (cy - 0.5 * h).round() as i32;
+    let rect = Rect::new(x, y, w.round() as i32, h.round() as i32);
+
+    // 7キーポイントを画像座標に変換（0..1仮定）
+    let mut kps = Vec::with_capacity(7);
+    for k in 0..7 { // kp0..kp6
+        let kx = det[off + 4 + k * 2].clamp(0.0, 1.0) * cols as f32;
+        let ky = det[off + 4 + k * 2 + 1].clamp(0.0, 1.0) * rows as f32;
+        kps.push(Point::new(kx.round() as i32, ky.round() as i32));
+    }
+
+    Some((rect, kps))
+}
+
+// 画像上に21点の手スケルトンを描画（MediaPipe標準の接続を簡略）
+fn draw_hand_landmarks(frame: &mut Mat, pts: &[(i32, i32)]) {
+    let color = Scalar::new(0.0, 200.0, 255.0, 0.0);
+    for &(x, y) in pts {
+        imgproc::circle(frame, Point::new(x, y), 3, color, -1, imgproc::LINE_8, 0).ok();
+    }
+    let edges: &[(usize, usize)] = &[
+        // 手首→各指の起点
+        (0, 1), (1, 2), (2, 3), (3, 4),      // 親指
+        (0, 5), (5, 6), (6, 7), (7, 8),      // 人差し指
+        (0, 9), (9,10), (10,11), (11,12),    // 中指
+        (0,13), (13,14), (14,15), (15,16),   // 薬指
+        (0,17), (17,18), (18,19), (19,20),   // 小指
+    ];
+    for &(a, b) in edges {
+        if a < pts.len() && b < pts.len() {
+            let pa = Point::new(pts[a].0, pts[a].1);
+            let pb = Point::new(pts[b].0, pts[b].1);
+            imgproc::line(frame, pa, pb, color, 2, imgproc::LINE_8, 0).ok();
+        }
+    }
+}
+
 async fn hand_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_web::Error> {
     println!("[hand] リクエスト受信: {}", req.path());
     let boundary = "boundarydonotcross";
@@ -203,10 +273,56 @@ async fn hand_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_web
                     }
                 };
 
-                // --- 出力確認 ---
+                // --- 手検出出力のデコード（仮定ベース）---
                 if let Ok((out_shape, out_data)) = outputs[0].try_extract_tensor::<f32>() {
                     println!("[hand] 出力shape: {:?}", out_shape);
-                    println!("[hand] 出力先頭要素: {:?}", out_data.get(0));
+                    let cols = frame.cols();
+                    let rows = frame.rows();
+                    if let Some((rect, kps)) = decode_best_detection(&out_data, cols, rows) {
+                        if let Some(r) = clamp_rect(rect, cols, rows) {
+                            // ROI抽出
+                            let roi = Mat::roi(&frame, r).unwrap_or_else(|_| frame.clone());
+
+                            // Landmark前処理（224x224）
+                            let l_input: Array4<f32> = preprocess(&roi, LANDMARK_SIZE);
+                            let l_shape: Vec<usize> = l_input.shape().to_vec();
+                            let l_data: Vec<f32> = l_input.into_raw_vec();
+                            match Value::from_array((l_shape, l_data)) {
+                                Ok(l_val) => {
+                                    match landmark.run([SessionInputValue::from(l_val)]) {
+                                        Ok(l_outs) => {
+                                            if let Ok((_ls, ldata)) = l_outs[0].try_extract_tensor::<f32>() {
+                                                // 21*3 = 63 を想定
+                                                let n = ldata.len().min(63);
+                                                if n >= 63 {
+                                                    let mut pts: Vec<(i32,i32)> = Vec::with_capacity(21);
+                                                    for j in 0..21 {
+                                                        let x = ldata[j*3 + 0].clamp(0.0, 1.0) * r.width as f32 + r.x as f32;
+                                                        let y = ldata[j*3 + 1].clamp(0.0, 1.0) * r.height as f32 + r.y as f32;
+                                                        pts.push((x.round() as i32, y.round() as i32));
+                                                    }
+                                                    // スケルトン描画
+                                                    draw_hand_landmarks(&mut frame, &pts);
+                                                } else {
+                                                    println!("[hand] Landmark出力が短い: {}", ldata.len());
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            println!("[hand] Landmark推論エラー: {e}");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!("[hand] Landmark入力生成エラー: {e}");
+                                }
+                            }
+
+                            // 検出矩形とキーポイントも描画
+                            imgproc::rectangle(&mut frame, r, Scalar::new(255.0, 0.0, 255.0, 0.0), 2, imgproc::LINE_8, 0).ok();
+                            for p in kps { imgproc::circle(&mut frame, p, 2, Scalar::new(0.0, 255.0, 255.0, 0.0), -1, imgproc::LINE_8, 0).ok(); }
+                        }
+                    }
                 }
 
                 // TODO: 検出結果を使ってROIを切り出し、landmarkモデルに入力
