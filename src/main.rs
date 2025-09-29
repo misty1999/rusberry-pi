@@ -129,7 +129,7 @@ async fn hand_stream_handler(_req: HttpRequest) -> impl Responder {
         .unwrap();
     let landmark = SessionBuilder::new(&env)
         .unwrap()
-        .with_model_from_file("/home/pi/models/MediaPipeHandLandmark.onnx")
+        .with_model_from_file("/home/pi/models/hand_landmark_sparse_Nx3x224x224.onnx")
         .unwrap();
 
     HttpResponse::Ok()
