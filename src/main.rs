@@ -7,10 +7,10 @@ use std::io::Write;
 use std::thread;
 use std::time::Duration;
 
-// onnxruntime/ndarray は骨格推定エンドポイント用に使います。
+// ort + ndarray は骨格推定エンドポイント用。
 // まだ推論の実装を入れ切らないため、未使用警告を抑制します。
 #[allow(unused_imports)]
-use onnxruntime::{environment::Environment, session::SessionBuilder, tensor::OrtOwnedTensor};
+use ort::Environment;
 #[allow(unused_imports)]
 use ndarray::Array4;
 
@@ -122,12 +122,14 @@ async fn hand_stream_handler(_req: HttpRequest) -> impl Responder {
 
     // モデル読み込み（簡便化のため各接続ごとに初期化）
     // 実運用では共有ステートに載せて再利用するのが望ましい
-    let env = std::sync::Arc::new(Environment::builder().build().unwrap());
-    let detector = SessionBuilder::new(&env)
+    let env = std::sync::Arc::new(Environment::builder().with_name("hand").build().unwrap());
+    let _detector = env
+        .new_session_builder()
         .unwrap()
         .with_model_from_file("/home/matsu/models/MediaPipeHandDetector.onnx")
         .unwrap();
-    let landmark = SessionBuilder::new(&env)
+    let _landmark = env
+        .new_session_builder()
         .unwrap()
         .with_model_from_file("/home/matsu/models/hand_landmark_sparse_Nx3x224x224.onnx")
         .unwrap();
