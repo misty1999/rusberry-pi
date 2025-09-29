@@ -124,12 +124,12 @@ async fn hand_stream_handler(_req: HttpRequest) -> Result<HttpResponse, actix_we
     // --- モデルは最初にロードして再利用する ---
     let mut detector: Session = SessionBuilder::new()
         .map_err(actix_web::error::ErrorInternalServerError)?
-        .commit_from_file("/home/pi/models/MediaPipeHandDetector.onnx")
+        .commit_from_file("/home/matsu/models/MediaPipeHandDetector.onnx")
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
     let landmark: Session = SessionBuilder::new()
         .map_err(actix_web::error::ErrorInternalServerError)?
-        .commit_from_file("/home/pi/models/hand_landmark_sparse_Nx3x224x224.onnx")
+        .commit_from_file("/home/matsu/models/hand_landmark_sparse_Nx3x224x224.onnx")
         .map_err(actix_web::error::ErrorInternalServerError)?;
 
     Ok(HttpResponse::Ok()
