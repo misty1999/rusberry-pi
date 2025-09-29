@@ -125,11 +125,11 @@ async fn hand_stream_handler(_req: HttpRequest) -> impl Responder {
     let env = std::sync::Arc::new(Environment::builder().build().unwrap());
     let detector = SessionBuilder::new(&env)
         .unwrap()
-        .with_model_from_file("/home/pi/models/MediaPipeHandDetector.onnx")
+        .with_model_from_file("/home/matsu/models/MediaPipeHandDetector.onnx")
         .unwrap();
     let landmark = SessionBuilder::new(&env)
         .unwrap()
-        .with_model_from_file("/home/pi/models/hand_landmark_sparse_Nx3x224x224.onnx")
+        .with_model_from_file("/home/matsu/models/hand_landmark_sparse_Nx3x224x224.onnx")
         .unwrap();
 
     HttpResponse::Ok()

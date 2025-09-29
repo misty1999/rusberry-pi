@@ -1,1 +1,1 @@
-https://huggingface.co/qualcomm/MediaPipe-Hand-Detection/blob/ba9417217525fda34b1c5de2292788ac03746613/MediaPipeHandDetector.onnx
+https://github.com/PINTO0309/hand-gesture-recognition-using-onnx/blob/main/model/hand_landmark/hand_landmark_sparse_Nx3x224x224.onnx
