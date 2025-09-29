@@ -7,5 +7,5 @@ edition = "2024"
 opencv = "0.92"
 actix-web = "4"
 async-stream = "0.3"
-onnxruntime = { version = "0.0.14", features = ["ndarray"] }
+onnxruntime = "0.0.14"
 ndarray = "0.15"
