@@ -1,11 +1,18 @@
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use opencv::{
-    core::{self, Point, Scalar},
+    core::{self, Point, Scalar, Size},
     imgcodecs, imgproc, prelude::*, videoio,
 };
 use std::io::Write;
 use std::thread;
 use std::time::Duration;
+
+// onnxruntime/ndarray は骨格推定エンドポイント用に使います。
+// まだ推論の実装を入れ切らないため、未使用警告を抑制します。
+#[allow(unused_imports)]
+use onnxruntime::{environment::Environment, session::SessionBuilder, tensor::OrtOwnedTensor};
+#[allow(unused_imports)]
+use ndarray::Array4;
 
 async fn stream_handler(_req: HttpRequest) -> impl Responder {
     let boundary = "boundarydonotcross";
@@ -75,9 +82,114 @@ async fn stream_handler(_req: HttpRequest) -> impl Responder {
         })
 }
 
+// 画像前処理: (1, 3, size, size) のRGB正規化テンソルに変換
+#[allow(dead_code)]
+fn preprocess(frame: &Mat, size: i32) -> Array4<f32> {
+    let mut resized = Mat::default();
+    imgproc::resize(
+        &frame,
+        &mut resized,
+        Size::new(size, size),
+        0.0,
+        0.0,
+        imgproc::INTER_LINEAR,
+    )
+    .unwrap();
+
+    let mut rgb = Mat::default();
+    imgproc::cvt_color(&resized, &mut rgb, imgproc::COLOR_BGR2RGB, 0).unwrap();
+
+    let data = rgb.data_bytes().unwrap();
+    let mut input = Array4::<f32>::zeros((1, 3, size as usize, size as usize));
+
+    for y in 0..size {
+        for x in 0..size {
+            let base = ((y * size + x) * 3) as usize;
+            input[[0, 0, y as usize, x as usize]] = data[base] as f32 / 255.0;
+            input[[0, 1, y as usize, x as usize]] = data[base + 1] as f32 / 255.0;
+            input[[0, 2, y as usize, x as usize]] = data[base + 2] as f32 / 255.0;
+        }
+    }
+    input
+}
+
+// 骨格（手）推定のMJPEGストリーム。/stream はそのまま、こちらは別ルート。
+async fn hand_stream_handler(_req: HttpRequest) -> impl Responder {
+    let boundary = "boundarydonotcross";
+
+    // カメラオープン
+    let mut cam = videoio::VideoCapture::new(0, videoio::CAP_ANY).unwrap();
+
+    // モデル読み込み（簡便化のため各接続ごとに初期化）
+    // 実運用では共有ステートに載せて再利用するのが望ましい
+    let env = std::sync::Arc::new(Environment::builder().build().unwrap());
+    let detector = SessionBuilder::new(&env)
+        .unwrap()
+        .with_model_from_file("/home/pi/models/MediaPipeHandDetector.onnx")
+        .unwrap();
+    let landmark = SessionBuilder::new(&env)
+        .unwrap()
+        .with_model_from_file("/home/pi/models/MediaPipeHandLandmark.onnx")
+        .unwrap();
+
+    HttpResponse::Ok()
+        .append_header((
+            "Content-Type",
+            format!("multipart/x-mixed-replace; boundary={}", boundary),
+        ))
+        .streaming::<_, actix_web::Error>(async_stream::stream! {
+            loop {
+                let mut frame = Mat::default();
+                cam.read(&mut frame).unwrap();
+                if frame.empty() {
+                    continue;
+                }
+
+                // 前処理テンソル（例: 224x224）
+                let _input = preprocess(&frame, 224);
+
+                // TODO: _input を detector に供給して手の検出ボックスを得る
+                // TODO: 検出ボックスに基づき切り出し、landmark に供給
+                // TODO: 出力21点を frame に描画（骨格ラインも）
+
+                // ひとまずプレースホルダ表示（エンドポイントの有効性確認用）
+                imgproc::put_text(
+                    &mut frame,
+                    "Hand Pose",
+                    Point::new(20, 40),
+                    imgproc::FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    Scalar::new(0.0, 255.0, 255.0, 0.0),
+                    2,
+                    imgproc::LINE_8,
+                    false,
+                ).ok();
+
+                // JPEG エンコード
+                let mut buf: core::Vector<u8> = core::Vector::new();
+                imgcodecs::imencode(".jpg", &frame, &mut buf, &core::Vector::<i32>::new()).unwrap();
+
+                // multipart 形式で送信
+                let mut data = Vec::new();
+                write!(data, "--{}\r\n", boundary).unwrap();
+                write!(data, "Content-Type: image/jpeg\r\n").unwrap();
+                write!(data, "Content-Length: {}\r\n\r\n", buf.len()).unwrap();
+                data.extend_from_slice(&buf.to_vec());
+                data.extend_from_slice(b"\r\n");
+
+                yield Ok::<_, actix_web::Error>(web::Bytes::from(data));
+                thread::sleep(Duration::from_millis(100)); // 10fps
+            }
+        })
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| App::new().route("/stream", web::get().to(stream_handler)))
+    HttpServer::new(|| {
+        App::new()
+            .route("/stream", web::get().to(stream_handler))
+            .route("/hand_stream", web::get().to(hand_stream_handler))
+    })
         .bind(("0.0.0.0", 8080))?
         .run()
         .await
