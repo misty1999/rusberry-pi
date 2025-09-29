@@ -262,7 +262,7 @@ async fn hand_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_web
                             };
 
                             // ===== Landmark 前処理 (NCHW) & 推論 =====
-                            let lm_in = preprocess_nchw(&roi, LANDMARK_SIZE);
+                            let lm_in = preprocess_nhwc(&roi, LANDMARK_SIZE);
                             let lm_shape: Vec<usize> = lm_in.shape().to_vec();
                             let lm_data: Vec<f32> = lm_in.into_raw_vec();
 
