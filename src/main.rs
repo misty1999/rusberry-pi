@@ -13,7 +13,7 @@ use ort::session::SessionInputValue;
 use ort::session::builder::SessionBuilder;
 use ort::value::Value;
 
-// モデル入力サイズ (NCHW)
+// モデル入力サイズ (MediaPipe Person DetectorはNHWC想定)
 const DETECTOR_SIZE: i32 = 256;
 
 // ========== 汎用 MJPEG カメラ配信（デバッグ用） ==========
@@ -72,8 +72,8 @@ async fn stream_handler(req: HttpRequest) -> impl Responder {
         })
 }
 
-// ========== 前処理 ==========
-fn preprocess_nchw(frame: &Mat, size: i32) -> Array4<f32> {
+// ========== 前処理 (NHWC) ==========
+fn preprocess_nhwc(frame: &Mat, size: i32) -> Array4<f32> {
     let mut resized = Mat::default();
     imgproc::resize(&frame, &mut resized, Size::new(size, size), 0.0, 0.0, imgproc::INTER_LINEAR).unwrap();
 
@@ -81,13 +81,13 @@ fn preprocess_nchw(frame: &Mat, size: i32) -> Array4<f32> {
     imgproc::cvt_color(&resized, &mut rgb, imgproc::COLOR_BGR2RGB, 0).unwrap();
 
     let data = rgb.data_bytes().unwrap();
-    let mut input = Array4::<f32>::zeros((1, 3, size as usize, size as usize));
+    let mut input = Array4::<f32>::zeros((1, size as usize, size as usize, 3));
     for y in 0..size {
         for x in 0..size {
             let base = ((y * size + x) * 3) as usize;
-            input[[0, 0, y as usize, x as usize]] = data[base] as f32 / 255.0;
-            input[[0, 1, y as usize, x as usize]] = data[base + 1] as f32 / 255.0;
-            input[[0, 2, y as usize, x as usize]] = data[base + 2] as f32 / 255.0;
+            input[[0, y as usize, x as usize, 0]] = data[base] as f32 / 255.0;
+            input[[0, y as usize, x as usize, 1]] = data[base + 1] as f32 / 255.0;
+            input[[0, y as usize, x as usize, 2]] = data[base + 2] as f32 / 255.0;
         }
     }
     input
@@ -156,6 +156,7 @@ async fn person_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_w
         .commit_from_file("/home/matsu/models/person_detector.onnx")
         .map_err(actix_web::error::ErrorInternalServerError)?;
     println!("[person] Detectorモデルをロードしました");
+    println!("[person] 入力: {:?}, 出力: {:?}", detector.inputs, detector.outputs);
 
     Ok(HttpResponse::Ok()
         .append_header(("Content-Type", format!("multipart/x-mixed-replace; boundary={}", boundary)))
@@ -166,8 +167,8 @@ async fn person_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_w
                     continue;
                 }
 
-                // Detector 前処理 & 推論
-                let det_in = preprocess_nchw(&frame, DETECTOR_SIZE);
+                // Detector 前処理 (NHWC) & 推論
+                let det_in = preprocess_nhwc(&frame, DETECTOR_SIZE);
                 let det_shape: Vec<usize> = det_in.shape().to_vec();
                 let det_data: Vec<f32> = det_in.into_raw_vec();
                 let det_val = match Value::from_array((det_shape, det_data)) {
@@ -177,7 +178,8 @@ async fn person_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_w
                     Ok(o) => o, Err(_) => continue,
                 };
 
-                if let Ok((_shape, out_data)) = det_outs[0].try_extract_tensor::<f32>() {
+                if let Ok((shape, out_data)) = det_outs[0].try_extract_tensor::<f32>() {
+                    println!("[person] 出力 shape = {:?}", shape);
                     let cols = frame.cols();
                     let rows = frame.rows();
                     if let Some(r) = decode_best_detection(&out_data, cols, rows) {
