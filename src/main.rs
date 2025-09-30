@@ -8,11 +8,8 @@ use std::thread;
 use std::time::Duration;
 
 use ndarray::Array4;
-use ort::session::Session;
-use ort::session::SessionInputValue;
-use ort::session::builder::SessionBuilder;
-use ort::value::Value;
-use ort::value::ValueRef;
+use candle_core::{Device, Tensor, DType};
+use candle_onnx::Model;
 
 // ---- Model settings ----
 const DETECTOR_SIZE: i32 = 224;       // [1,3,224,224]
@@ -124,7 +121,6 @@ fn decode_persons_with_scores(
         if conf < conf_thresh { continue; }
 
         let off = i * boxes_dim;
-        // 先頭4つを (cx, cy, w, h) と仮定
         let cx = boxes[off + 0] * cols as f32;
         let cy = boxes[off + 1] * rows as f32;
         let w  = boxes[off + 2] * cols as f32;
@@ -142,7 +138,6 @@ fn decode_persons_with_scores(
         out.push((rect, conf));
     }
 
-    // conf 降順で上位だけ使う
     out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     if out.len() > MAX_DRAW {
         out.truncate(MAX_DRAW);
@@ -163,9 +158,9 @@ async fn person_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_w
         Err(e) => println!("[person] カメラ状態取得エラー: {e}"),
     }
 
-    let mut detector: Session = SessionBuilder::new()
-        .map_err(actix_web::error::ErrorInternalServerError)?
-        .commit_from_file("/home/matsu/models/person_detector.onnx")
+    // Candle モデル読み込み
+    let device = Device::Cpu;
+    let model = Model::load("/home/matsu/models/person_detector.onnx", &device)
         .map_err(actix_web::error::ErrorInternalServerError)?;
     println!("[person] Detectorモデルをロードしました");
 
@@ -178,43 +173,44 @@ async fn person_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_w
                     continue;
                 }
 
-                // ---- 前処理 & 推論 ----
+                // 前処理
                 let det_in = preprocess_nchw(&frame, DETECTOR_SIZE);
                 let det_shape: Vec<usize> = det_in.shape().to_vec();
                 let det_data: Vec<f32> = det_in.into_raw_vec();
-                let det_val = match Value::from_array((det_shape, det_data)) {
-                    Ok(v) => v, Err(e) => { println!("[person] 入力テンソル作成エラー: {e}"); continue; }
+
+                // Tensor 化
+                let input = match Tensor::from_vec(
+                    det_data,
+                    (det_shape[0], det_shape[1], det_shape[2], det_shape[3]),
+                    &device
+                ) {
+                    Ok(t) => t,
+                    Err(e) => { println!("[person] 入力Tensor作成エラー: {e}"); continue; }
                 };
-                let det_outs = match detector.run([SessionInputValue::from(det_val)]) {
-                    Ok(o) => o, Err(e) => { println!("[person] 推論エラー: {e}"); continue; }
+
+                // 推論
+                let outputs = match model.run(vec![input]) {
+                    Ok(o) => o,
+                    Err(e) => { println!("[person] 推論エラー: {e}"); continue; }
                 };
 
                 let mut boxes_data: Option<(Vec<f32>, usize)> = None;
                 let mut scores_data: Option<Vec<f32>> = None;
 
-                for (idx, out) in det_outs.iter().enumerate() {
-                    match out.1 {
-                        ValueRef::Tensor(tensor) => {
-                            let shape: Vec<usize> = tensor.dim().to_vec();
-                            let data: Vec<f32> = tensor.data().to_vec();
-
-                            if shape.len() == 3 && shape[2] == 12 {
-                                println!("[person] out[{idx}] -> boxes {:?}, len={}", shape, data.len());
-                                boxes_data = Some((data, 12));
-                            } else if shape.len() == 3 && shape[2] == 1 {
-                                println!("[person] out[{idx}] -> scores {:?}", shape);
-                                let mut s = Vec::with_capacity(shape[1]);
-                                for i in 0..shape[1] {
-                                    s.push(data[i]);
-                                }
-                                scores_data = Some(s);
-                            } else {
-                                println!("[person] out[{idx}] 未対応 shape = {:?}", shape);
-                            }
+                for (idx, out) in outputs.iter().enumerate() {
+                    let shape = out.dims();
+                    if shape.len() == 3 && shape[2] == 12 {
+                        if let Ok(data) = out.to_vec1::<f32>() {
+                            println!("[person] out[{idx}] -> boxes {:?}, len={}", shape, data.len());
+                            boxes_data = Some((data, 12));
                         }
-                        _ => {
-                            println!("[person] out[{idx}] は Tensor ではありません");
+                    } else if shape.len() == 3 && shape[2] == 1 {
+                        if let Ok(data) = out.to_vec1::<f32>() {
+                            println!("[person] out[{idx}] -> scores {:?}", shape);
+                            scores_data = Some(data);
                         }
+                    } else {
+                        println!("[person] out[{idx}] 未対応 shape = {:?}", shape);
                     }
                 }
 
@@ -238,11 +234,9 @@ async fn person_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_w
                             false,
                         );
                     }
-                } else {
-                    println!("[person] 出力（boxes/scores）が揃っていません。スキップ");
                 }
 
-                // ---- JPEG 送出 ----
+                // JPEG 送出
                 let mut buf: core::Vector<u8> = core::Vector::new();
                 if imgcodecs::imencode(".jpg", &frame, &mut buf, &core::Vector::<i32>::new()).is_err() {
                     continue;
