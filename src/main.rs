@@ -160,8 +160,9 @@ async fn person_stream_handler(req: HttpRequest) -> Result<HttpResponse, actix_w
 
     // Candle モデル読み込み
     let device = Device::Cpu;
-    let model = Model::load("/home/matsu/models/person_detector.onnx", &device)
-        .map_err(actix_web::error::ErrorInternalServerError)?;
+    let config = Config::default().with_full_fp16(true);
+
+    let model = Model::load_with_config("/home/matsu/models/person_detector.onnx", &device, &config)?;
     println!("[person] Detectorモデルをロードしました");
 
     Ok(HttpResponse::Ok()
